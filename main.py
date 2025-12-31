@@ -1,11 +1,21 @@
 import requests
 import json
 import os
-from datetime import datetime, timedelta, date
+from datetime import datetime, timedelta
+
+# ============================
+# CONFIGURATION
+# ============================
 
 API_TOKEN = "pk_218696006_UXYXEI6AKDLMXJ3P4INX79SD9ZO0UTF0"
 LIST_ID = "901412176234"
 TAG_FILTER = "%23new"
+
+headers = {"Authorization": API_TOKEN}
+
+# ============================
+# CLICKUP FIELD IDS
+# ============================
 
 FIELD_COMMERCE_PLATFORM = "4927273a-9c1f-4042-8aca-5fd4d14fa26a"
 
@@ -20,22 +30,64 @@ FIELD_MAP = {
 
 STAGE_ORDER = ["Kickoff", "Design", "Integration", "PreGoLive", "QA", "GoLive"]
 
+# ============================
+# PLATFORM OFFSETS (WORKING DAYS)
+# ============================
+
 STAGE_OFFSETS = {
-    "shopify": {"Kickoff": 2, "Design": 2, "Integration": 2, "PreGoLive": 1, "QA": 1, "GoLive": 1},
-    "rich": {"Kickoff": 2, "Design": 5, "Integration": 7, "PreGoLive": 2, "QA": 4, "GoLive": 1},
-    "custom": {"Kickoff": 2, "Design": 6, "Integration": 20, "PreGoLive": 2, "QA": 4, "GoLive": 1}
+    "shopify": {
+        "Kickoff": 2,
+        "Design": 2,
+        "Integration": 2,
+        "PreGoLive": 1,
+        "QA": 1,
+        "GoLive": 1
+    },
+    "rich": {
+        "Kickoff": 2,
+        "Design": 5,
+        "Integration": 7,
+        "PreGoLive": 2,
+        "QA": 4,
+        "GoLive": 1
+    },
+    "custom": {
+        "Kickoff": 2,
+        "Design": 6,
+        "Integration": 20,
+        "PreGoLive": 2,
+        "QA": 4,
+        "GoLive": 1
+    }
 }
 
-headers = {"Authorization": API_TOKEN}
+RICH_PLATFORMS = ["woo", "woocommerce", "magento", "sfcc", "big"]
+
+# ============================
+# GLOBAL DROPDOWN MAPS
+# ============================
+
+PLATFORM_UUID_TO_NAME = {}
+PLATFORM_ID_BY_INDEX = []
+
+# ============================
+# LOAD HOLIDAYS
+# ============================
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-HOLIDAYS_FILE = os.path.join(BASE_DIR, "config", "holidays.json")
+HOLIDAY_FILE = os.path.join(BASE_DIR, "config", "holidays.json")
 
-with open(HOLIDAYS_FILE, "r") as f:
+with open(HOLIDAY_FILE, "r") as f:
     HOLIDAYS = {
         datetime.strptime(d, "%Y-%m-%d").date()
         for d in json.load(f)["holidays"]
     }
+
+print(f"✅ Loaded {len(HOLIDAYS)} holidays")
+
+# ============================
+# DATE HELPERS
+# ============================
 
 def add_workdays(start_date, days):
     current = start_date
@@ -45,51 +97,83 @@ def add_workdays(start_date, days):
             days -= 1
     return current
 
+# ============================
+# CLICKUP HELPERS
+# ============================
+
+def fetch_field_options():
+    global PLATFORM_UUID_TO_NAME, PLATFORM_ID_BY_INDEX
+
+    url = f"https://api.clickup.com/api/v2/list/{LIST_ID}/field"
+    r = requests.get(url, headers=headers)
+
+    if r.status_code != 200:
+        return False
+
+    fields = r.json().get("fields", [])
+    field = next(f for f in fields if f["id"] == FIELD_COMMERCE_PLATFORM)
+
+    PLATFORM_UUID_TO_NAME = {o["id"]: o["name"] for o in field["type_config"]["options"]}
+    sorted_opts = sorted(field["type_config"]["options"], key=lambda x: x["orderindex"])
+    PLATFORM_ID_BY_INDEX = [o["id"] for o in sorted_opts]
+
+    return True
+
+def get_all_tasks():
+    tasks = []
+    page = 0
+    while True:
+        url = f"https://api.clickup.com/api/v2/list/{LIST_ID}/task?page={page}&tags[]={TAG_FILTER}"
+        r = requests.get(url, headers=headers)
+        data = r.json()
+        if not data.get("tasks"):
+            break
+        tasks.extend(data["tasks"])
+        page += 1
+    return tasks
+
+def resolve_platform(task):
+    platform = "custom"
+
+    for f in task.get("custom_fields", []):
+        if f["id"] == FIELD_COMMERCE_PLATFORM:
+            raw = f.get("value")
+            option_id = None
+
+            if isinstance(raw, int) and raw < len(PLATFORM_ID_BY_INDEX):
+                option_id = PLATFORM_ID_BY_INDEX[raw]
+            elif isinstance(raw, str):
+                option_id = raw
+            elif isinstance(raw, list) and raw:
+                option_id = raw[0]
+
+            if option_id:
+                name = PLATFORM_UUID_TO_NAME.get(option_id, "").lower()
+                if "shopify" in name:
+                    platform = "shopify"
+                elif any(p in name for p in RICH_PLATFORMS):
+                    platform = "rich"
+            break
+
+    return platform
+
+# ============================
+# MAIN
+# ============================
+
 def run():
-    tasks = requests.get(
-        f"https://api.clickup.com/api/v2/list/{LIST_ID}/task?tags[]={TAG_FILTER}",
-        headers=headers
-    ).json()["tasks"]
+    if not fetch_field_options():
+        print("❌ Failed to load platform dropdown")
+        return
+
+    tasks = get_all_tasks()
+    print(f"🔎 Processing {len(tasks)} tasks")
 
     for task in tasks:
         task_id = task["id"]
         created = datetime.fromtimestamp(int(task["date_created"]) / 1000)
 
-        platform = "custom"
-
-        for f in task.get("custom_fields", []):
-            if f["id"] == FIELD_COMMERCE_PLATFORM:
-                raw_value = f.get("value")
-        
-                option_id = None
-        
-                if isinstance(raw_value, int):
-                    # index-based dropdown
-                    try:
-                        option_id = PLATFORM_ID_BY_INDEX[raw_value]
-                    except IndexError:
-                        option_id = None
-        
-                elif isinstance(raw_value, str):
-                    # UUID-based dropdown
-                    option_id = raw_value
-        
-                elif isinstance(raw_value, list) and raw_value:
-                    # multi-select dropdown
-                    option_id = raw_value[0]
-        
-                if option_id:
-                    platform_name = PLATFORM_UUID_TO_NAME.get(option_id, "").lower()
-        
-                    if "shopify" in platform_name:
-                        platform = "shopify"
-                    elif any(p in platform_name for p in ["woo", "magento", "sfcc", "big"]):
-                        platform = "rich"
-                    else:
-                        platform = "custom"
-        
-                break
-
+        platform = resolve_platform(task)
         current_date = created
 
         for stage in STAGE_ORDER:
@@ -101,13 +185,12 @@ def run():
                 "value_options": {"time": True}
             }
 
-            requests.post(
-                f"https://api.clickup.com/api/v2/task/{task_id}/field/{FIELD_MAP[stage]}",
-                headers=headers,
-                json=payload
-            )
+            url = f"https://api.clickup.com/api/v2/task/{task_id}/field/{FIELD_MAP[stage]}"
+            requests.post(url, headers=headers, json=payload)
 
-        print(f"✅ {task_id} updated | {platform}")
+        print(f"✅ {task_id} | Platform: {platform}")
+
+    print("🎯 Completed successfully")
 
 if __name__ == "__main__":
     run()
