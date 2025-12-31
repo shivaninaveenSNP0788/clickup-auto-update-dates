@@ -1,4 +1,4 @@
-name: Daily ClickUp Update
+name: Daily Milestone Dates Update
 
 on:
   schedule:
