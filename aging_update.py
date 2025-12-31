@@ -101,10 +101,11 @@ class ClickUpIntegration:
         return None
 
     def has_required_tag(self, task):
-        return any(
-            tag.get("name", "").lower() == self.required_tag
-            for tag in task.get("tags", [])
-        )
+    for tag in task.get("tags", []):
+        tag_name = tag.get("name", "").lower().lstrip("#")
+        if tag_name == self.required_tag:
+            return True
+    return False
 
     def calculate_and_update_aging(self, list_id, kickoff_field_id, aging_field_id):
         tasks = self.get_tasks(list_id)
