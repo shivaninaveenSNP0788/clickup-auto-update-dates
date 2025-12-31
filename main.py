@@ -1,5 +1,6 @@
 import requests
 import json
+import os
 from datetime import datetime, timedelta, date
 
 API_TOKEN = "pk_218696006_UXYXEI6AKDLMXJ3P4INX79SD9ZO0UTF0"
@@ -27,8 +28,14 @@ STAGE_OFFSETS = {
 
 headers = {"Authorization": API_TOKEN}
 
-with open("config/holidays.json") as f:
-    HOLIDAYS = {datetime.strptime(d, "%Y-%m-%d").date() for d in json.load(f)["holidays"]}
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+HOLIDAYS_FILE = os.path.join(BASE_DIR, "config", "holidays.json")
+
+with open(HOLIDAYS_FILE, "r") as f:
+    HOLIDAYS = {
+        datetime.strptime(d, "%Y-%m-%d").date()
+        for d in json.load(f)["holidays"]
+    }
 
 def add_workdays(start_date, days):
     current = start_date
