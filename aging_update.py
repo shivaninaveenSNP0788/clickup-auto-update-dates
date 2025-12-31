@@ -1,196 +1,146 @@
 import json
 import requests
-from datetime import datetime, timedelta
-import sys
-import urllib.parse
+from datetime import datetime, timedelta, date
 
+# ---------------- CONFIG LOADERS ---------------- #
 
-# ======================================================
-# Working Days Calculator
-# ======================================================
+def load_json(path):
+    with open(path, "r") as f:
+        return json.load(f)
+
+# ---------------- WORKING DAYS CALCULATOR ---------------- #
+
 class WorkingDaysCalculator:
-    def __init__(self, holidays_file="config/holidays.json"):
+    def __init__(self, holidays_file):
         self.holidays = self._load_holidays(holidays_file)
 
-    def _load_holidays(self, filepath):
+    def _load_holidays(self, path):
         try:
-            with open(filepath, "r") as f:
-                data = json.load(f)
-                return {
-                    datetime.strptime(d, "%Y-%m-%d").date()
-                    for d in data.get("holidays", [])
-                }
-        except Exception as e:
-            print(f"⚠️ Failed to load holidays: {e}")
+            data = load_json(path)
+            return {
+                datetime.strptime(d, "%Y-%m-%d").date()
+                for d in data.get("holidays", [])
+            }
+        except Exception:
             return set()
 
-    def is_working_day(self, day):
-        return day.weekday() < 5 and day not in self.holidays
+    def is_working_day(self, d):
+        return d.weekday() < 5 and d not in self.holidays
 
-    def calculate_working_days(self, start_date, end_date=None):
-        if isinstance(start_date, datetime):
-            start_date = start_date.date()
-
-        if end_date is None:
-            end_date = datetime.now().date()
-        elif isinstance(end_date, datetime):
-            end_date = end_date.date()
-
+    def calculate(self, start_date, end_date):
         if start_date > end_date:
-            start_date, end_date = end_date, start_date
+            return 0
 
-        days = 0
+        count = 0
         current = start_date
-
-        while current <= end_date:
+        while current < end_date:
             if self.is_working_day(current):
-                days += 1
+                count += 1
             current += timedelta(days=1)
+        return count
 
-        return days
+# ---------------- CLICKUP CLIENT ---------------- #
 
-
-# ======================================================
-# ClickUp Integration
-# ======================================================
-class ClickUpIntegration:
+class ClickUpClient:
     BASE_URL = "https://api.clickup.com/api/v2"
 
-    def __init__(self, api_token, required_tag):
+    def __init__(self, config):
         self.headers = {
-            "Authorization": api_token,
+            "Authorization": config["api_token"],
             "Content-Type": "application/json"
         }
-        self.calculator = WorkingDaysCalculator()
+        self.list_id = config["list_id"]
+        self.kickoff_field_id = config["kickoff_field_id"]
+        self.go_live_field_id = config["go_live_field_id"]
+        self.aging_field_id = config["aging_field_id"]
+        self.required_tag = config["required_tag"].lower()
 
-        # Decode %23new → #new → new
-        decoded = urllib.parse.unquote(required_tag)
-        self.required_tag = decoded.lstrip("#").lower()
+        self.calculator = WorkingDaysCalculator("config/holidays.json")
 
-    def get_tasks(self, list_id):
-        url = f"{self.BASE_URL}/list/{list_id}/task"
+    def get_tasks(self):
+        url = f"{self.BASE_URL}/list/{self.list_id}/task"
         params = {"include_closed": "true", "subtasks": "true"}
 
-        try:
-            res = requests.get(url, headers=self.headers, params=params)
-            res.raise_for_status()
-            return res.json().get("tasks", [])
-        except Exception as e:
-            print(f"❌ Error fetching tasks: {e}")
-            return []
+        response = requests.get(url, headers=self.headers, params=params)
+        response.raise_for_status()
+        return response.json().get("tasks", [])
 
-    def update_custom_field(self, task_id, field_id, value):
-        url = f"{self.BASE_URL}/task/{task_id}/field/{field_id}"
-        payload = {"value": value}
+    def update_field(self, task_id, value):
+        url = f"{self.BASE_URL}/task/{task_id}/field/{self.aging_field_id}"
+        return requests.post(
+            url,
+            headers=self.headers,
+            json={"value": str(value)}
+        ).ok
 
-        try:
-            res = requests.post(url, headers=self.headers, json=payload)
-            res.raise_for_status()
-            return True
-        except Exception as e:
-            print(f"❌ Failed updating task {task_id}: {e}")
-            return False
-
-    def get_custom_field_value_by_id(self, task, field_id):
+    @staticmethod
+    def get_custom_field(task, field_id):
         for field in task.get("custom_fields", []):
-            if field.get("id") == field_id:
-                value = field.get("value")
-                if value and field.get("type") == "date":
-                    return datetime.fromtimestamp(int(value) / 1000)
-                return value
+            if field["id"] == field_id and field.get("value"):
+                if field["type"] == "date":
+                    return datetime.fromtimestamp(int(field["value"]) / 1000).date()
+                return field["value"]
         return None
 
-    def has_required_tag(self, task):
-        for tag in task.get("tags", []):
-            tag_name = tag.get("name", "").lower().lstrip("#")
-            if tag_name == self.required_tag:
-                return True
-        return False
+    @staticmethod
+    def has_required_tag(task, tag):
+        return tag in [t["name"].lower() for t in task.get("tags", [])]
 
-    def calculate_and_update_aging(self, list_id, kickoff_field_id, aging_field_id):
-        tasks = self.get_tasks(list_id)
+# ---------------- MAIN LOGIC ---------------- #
 
-        updated, skipped = 0, 0
+LIVE_STATUSES = {"live", "prod qa", "hypercare"}
 
-        for task in tasks:
-            if not self.has_required_tag(task):
-                continue
-
-            task_id = task.get("id")
-            name = task.get("name")
-
-            kickoff_date = self.get_custom_field_value_by_id(
-                task, kickoff_field_id
-            )
-
-            if not kickoff_date:
-                print(f"⊘ Skipped: {name} (No kickoff date)")
-                skipped += 1
-                continue
-
-            closed_date = None
-            if task.get("date_closed"):
-                closed_date = datetime.fromtimestamp(
-                    int(task["date_closed"]) / 1000
-                )
-
-            aging_days = self.calculator.calculate_working_days(
-                kickoff_date, closed_date
-            )
-
-            # TEXT FIELD → MUST BE STRING
-            if self.update_custom_field(
-                task_id, aging_field_id, str(aging_days)
-            ):
-                status = "Closed" if closed_date else "Open"
-                print(f"✓ {name} [{status}] → Aging: {aging_days}")
-                updated += 1
-            else:
-                skipped += 1
-
-        print("\n" + "=" * 60)
-        print(f"Summary: {updated} updated | {skipped} skipped")
-        print("=" * 60)
-
-        print("\n🔎 DEBUG: Tags found in tasks")
-        for task in tasks:
-            if task.get("tags"):
-                print(
-                    task.get("name"),
-                    "→",
-                    [tag.get("name") for tag in task.get("tags")]
-                )
-
-
-# ======================================================
-# Config Loader
-# ======================================================
-def load_clickup_config(path="config/clickup_config.json"):
+def main():
     try:
-        with open(path, "r") as f:
-            return json.load(f)
+        config = load_json("config/clickup_config.json")
     except Exception as e:
         print(f"❌ Failed to load ClickUp config: {e}")
-        sys.exit(1)
+        return
 
+    client = ClickUpClient(config)
+    tasks = client.get_tasks()
 
-# ======================================================
-# MAIN
-# ======================================================
-def main():
-    config = load_clickup_config()
+    updated = skipped = 0
+    today = date.today()
 
-    clickup = ClickUpIntegration(
-        api_token=config["api_token"],
-        required_tag=config["required_tag"]
-    )
+    for task in tasks:
+        name = task["name"]
+        status = task["status"]["status"].lower()
 
-    clickup.calculate_and_update_aging(
-        list_id=config["list_id"],
-        kickoff_field_id=config["kickoff_field_id"],
-        aging_field_id=config["aging_field_id"]
-    )
+        if not client.has_required_tag(task, client.required_tag):
+            continue
 
+        kickoff = client.get_custom_field(task, client.kickoff_field_id)
+        if not kickoff:
+            print(f"⊘ Skipped: {name} (No kickoff date)")
+            skipped += 1
+            continue
+
+        go_live = client.get_custom_field(task, client.go_live_field_id)
+
+        if status in LIVE_STATUSES:
+            if not go_live:
+                print(f"⊘ Skipped: {name} (Missing Go Live Date)")
+                skipped += 1
+                continue
+            end_date = go_live
+        else:
+            end_date = today
+
+        aging = client.calculator.calculate(kickoff, end_date)
+
+        if client.update_field(task["id"], aging):
+            print(f"✓ {name} [{task['status']['status']}] → Aging: {aging}")
+            updated += 1
+        else:
+            print(f"✗ Failed update: {name}")
+            skipped += 1
+
+    print("\n" + "=" * 60)
+    print(f"Summary: {updated} updated | {skipped} skipped")
+    print("=" * 60)
+
+# ---------------- ENTRY POINT ---------------- #
 
 if __name__ == "__main__":
     main()
