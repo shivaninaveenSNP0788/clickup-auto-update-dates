@@ -151,6 +151,15 @@ class ClickUpIntegration:
         print(f"Summary: {updated} updated | {skipped} skipped")
         print("=" * 60)
 
+        print("\n🔎 DEBUG: Tags found in tasks")
+        for task in tasks:
+            if task.get("tags"):
+                print(
+                    task.get("name"),
+                    "→",
+                    [tag.get("name") for tag in task.get("tags")]
+                )
+
 
 # ======================================================
 # Config Loader
