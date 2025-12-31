@@ -1,0 +1,28 @@
+name: ClickUp Aging Update
+
+on:
+  schedule:
+    - cron: "0 4 * * *"   # 9:30 AM IST
+  workflow_dispatch:
+
+jobs:
+  aging:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run Aging Script
+        env:
+          CLICKUP_API_TOKEN: ${{ secrets.CLICKUP_API_TOKEN }}
+          CLICKUP_LIST_ID: ${{ secrets.CLICKUP_LIST_ID }}
+          FIELD_ACTUAL_KICKOFF: ${{ secrets.FIELD_ACTUAL_KICKOFF }}
+          FIELD_AGING: ${{ secrets.FIELD_AGING }}
+        run: python aging_update.py
