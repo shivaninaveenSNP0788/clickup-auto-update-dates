@@ -1,7 +1,7 @@
 import json
 import requests
 from datetime import datetime, timedelta, date
-from urllib.parse import unquote
+from urllib.parse import quote, unquote
 
 # ---------------- CONFIG LOADERS ---------------- #
 
@@ -54,28 +54,47 @@ class ClickUpClient:
         self.kickoff_field_id = config["kickoff_field_id"]
         self.go_live_field_id = config["go_live_field_id"]
         self.aging_field_id = config["aging_field_id"]
-        #self.required_tag = config["required_tag"].lower()
         self.required_tag = unquote(config["required_tag"]).lower()
         print("🔎 Matching tag:", self.required_tag)
 
         self.calculator = WorkingDaysCalculator("config/holidays.json")
 
-    def get_tasks(self):
-        url = f"{self.BASE_URL}/list/{self.list_id}/task"
-        params = {"include_closed": "true", "subtasks": "false"}
+    def get_tasks_with_kickoff(self):
+        """
+        Fetch only tasks where the kickoff custom field is set using ClickUp API filter.
+        Prints task details for debugging.
+        """
+        filter_obj = [
+            {"field_id": self.kickoff_field_id, "operator": "IS NOT NULL"}
+        ]
+        encoded_filter = quote(json.dumps(filter_obj))
 
-        response = requests.get(url, headers=self.headers, params=params)
+        url = f"{self.BASE_URL}/list/{self.list_id}/task"
+        params = f"include_closed=true&subtasks=false&custom_fields={encoded_filter}"
+        full_url = f"{url}?{params}"
+
+        response = requests.get(full_url, headers=self.headers)
         response.raise_for_status()
-        return response.json().get("tasks", [])
-        print("tasks", response.json().get("tasks", [])) break
+        tasks = response.json().get("tasks", [])
+
+        print(f"ℹ Fetched {len(tasks)} tasks with kickoff date set\n")
+
+        # Print task details
+        for task in tasks:
+            name = task.get("name")
+            status = task.get("status", {}).get("status")
+            kickoff = self.get_custom_field(task, self.kickoff_field_id)
+            go_live = self.get_custom_field(task, self.go_live_field_id)
+            print(f"Task: {name} | Status: {status} | Kickoff: {kickoff} | Go Live: {go_live}")
+
+        return tasks
 
     def update_field(self, task_id, value):
         url = f"{self.BASE_URL}/task/{task_id}/field/{self.aging_field_id}"
-        return requests.post(
-            url,
-            headers=self.headers,
-            json={"value": str(value)}
-        ).ok
+        response = requests.post(url, headers=self.headers, json={"value": str(value)})
+        if not response.ok:
+            print(f"✗ Failed update for {task_id}: {response.status_code}, {response.text}")
+        return response.ok
 
     @staticmethod
     def get_custom_field(task, field_id):
@@ -102,7 +121,7 @@ def main():
         return
 
     client = ClickUpClient(config)
-    tasks = client.get_tasks()
+    tasks = client.get_tasks_with_kickoff()  # Fetch only tasks with kickoff
 
     updated = skipped = 0
     today = date.today()
@@ -111,33 +130,32 @@ def main():
         name = task["name"]
         status = task["status"]["status"].lower()
 
+        # Check for required tag
         if not client.has_required_tag(task, client.required_tag):
-            continue
-
-        kickoff = client.get_custom_field(task, client.kickoff_field_id)
-        if not kickoff:
-            print(f"⊘ Skipped: {name} (No kickoff date)")
+            print(f"⊘ Skipped: {name} (Missing required tag)")
             skipped += 1
             continue
 
+        kickoff = client.get_custom_field(task, client.kickoff_field_id)
         go_live = client.get_custom_field(task, client.go_live_field_id)
 
+        # Determine end date
         if status in LIVE_STATUSES:
             if not go_live:
-                print(f"⊘ Skipped: {name} (Missing Go Live Date)")
-                skipped += 1
-                continue
-            end_date = go_live
+                print(f"⚠ {name} is {status} but Go Live not set, using today as end date")
+            end_date = go_live if go_live else today
         else:
             end_date = today
 
-        aging = client.calculator.calculate(kickoff, end_date)
+        # Calculate aging
+        aging_days = client.calculator.calculate(kickoff, end_date)
+        aging_value = f"{aging_days}d"
 
-        if client.update_field(task["id"], aging):
-            print(f"✓ {name} [{task['status']['status']}] → Aging: {aging}")
+        # Update ClickUp field
+        if client.update_field(task["id"], aging_value):
+            print(f"✓ {name} [{task['status']['status']}] → Aging: {aging_value}")
             updated += 1
         else:
-            print(f"✗ Failed update: {name}")
             skipped += 1
 
     print("\n" + "=" * 60)
