@@ -1,4 +1,4 @@
-name: Update ClickUp Baseline by Commerce Platform
+name: Daily Baseline Aging Update by Commerce Platform
 
 on:
   schedule:
